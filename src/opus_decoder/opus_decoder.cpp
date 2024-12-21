@@ -3,7 +3,7 @@
  * based on Xiph.Org Foundation celt decoder
  *
  *  Created on: 26.01.2023
- *  Updated on: 18.12.2024
+ *  Updated on: 20.12.2024
  */
 //----------------------------------------------------------------------------------------------------------------------
 //                                     O G G / O P U S     I M P L.
@@ -14,6 +14,10 @@
 #include "Arduino.h"
 #include <vector>
 
+#define __malloc_heap_psram(size) \
+    heap_caps_malloc_prefer(size, 2, MALLOC_CAP_DEFAULT | MALLOC_CAP_SPIRAM, MALLOC_CAP_DEFAULT | MALLOC_CAP_INTERNAL)
+#define __calloc_heap_psram(ch, size) \
+    heap_caps_calloc_prefer(ch, size, 2, MALLOC_CAP_DEFAULT | MALLOC_CAP_SPIRAM, MALLOC_CAP_DEFAULT | MALLOC_CAP_INTERNAL)
 
 // global vars
 const uint32_t CELT_SET_END_BAND_REQUEST   = 10012;
@@ -65,9 +69,9 @@ float     s_opusCompressionRatio = 0;
 std::vector <uint32_t>s_opusBlockPicItem;
 
 bool OPUSDecoder_AllocateBuffers(){
-    s_opusChbuf = (char*)malloc(512);
+    s_opusChbuf = (char*)__malloc_heap_psram(512);
     if(!CELTDecoder_AllocateBuffers()) {log_e("CELT not init"); return false;}
-    s_opusSegmentTable = (uint16_t*)malloc(256 * sizeof(uint16_t));
+    s_opusSegmentTable = (uint16_t*)__malloc_heap_psram(256 * sizeof(uint16_t));
     if(!s_opusSegmentTable) {log_e("CELT not init"); return false;}
     CELTDecoder_ClearBuffer();
     OPUSDecoder_ClearBuffers();
@@ -80,13 +84,14 @@ bool OPUSDecoder_AllocateBuffers(){
     int32_t ret = 0, silkDecSizeBytes = 0;
     (void) ret;
     (void) silkDecSizeBytes;
+    silk_InitDecoder();
     //ret = silk_Get_Decoder_Size(&silkDecSizeBytes);
-    if (ret){
-        log_e("internal error");
-    }
-    else{
-        log_i("silkDecSizeBytes %i", silkDecSizeBytes);
-    }
+    // if (ret){
+    //     log_e("internal error");
+    // }
+    // else{
+    //     log_i("silkDecSizeBytes %i", silkDecSizeBytes);
+    // }
     return true;
 }
 void OPUSDecoder_FreeBuffers(){
@@ -364,11 +369,6 @@ int32_t opus_decode_frame(uint8_t *inbuf, int16_t *outbuf, int32_t packetLen, ui
     }
 
     if(s_mode == MODE_SILK_ONLY) {
-        log_w("Silk mode not yet supported");
-        ret = samplesPerFrame;
-
-
-
         int decodedSamples = 0;
         int32_t silk_frame_size;
         uint16_t payloadSize_ms = max(10, 1000 * samplesPerFrame / 48000);
@@ -377,14 +377,21 @@ int32_t opus_decode_frame(uint8_t *inbuf, int16_t *outbuf, int32_t packetLen, ui
         else if(s_bandWidth == OPUS_BANDWIDTH_WIDEBAND) { s_internalSampleRate = 16000; }
         else { s_internalSampleRate = 16000; }
         ec_dec_init((uint8_t *)inbuf, packetLen);
-        silk_setRawParams(2, 2, payloadSize_ms, s_internalSampleRate, 48000);
+        uint8_t APIchannels = 2;
+        silk_setRawParams(s_opusChannels, APIchannels, payloadSize_ms, s_internalSampleRate, 48000);
     //    log_w("payloadSize_ms %i, s_internalSampleRate %i", payloadSize_ms, s_internalSampleRate);
-        silk_InitDecoder();
+        static bool silkInit = false;
+        if(!silkInit){
+            silkInit = true;
+            silk_InitDecoder();
+        }
+    //    silk_InitDecoder();
 
         do{
             /* Call SILK decoder */
+            int lost_flag = 0;
             int first_frame = decodedSamples == 0;
-            int silk_ret = silk_Decode(0, first_frame, (int16_t*)outbuf + decodedSamples, &silk_frame_size);
+            int silk_ret = silk_Decode(lost_flag, first_frame, (int16_t*)outbuf + decodedSamples, &silk_frame_size);
             if(silk_ret)log_w("silk_ret %i", silk_ret);
             decodedSamples += silk_frame_size;
     //        log_w("decodedSamples %i, samplesPerFrame %i", decodedSamples, samplesPerFrame);
