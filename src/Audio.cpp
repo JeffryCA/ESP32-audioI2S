@@ -533,6 +533,113 @@ bool Audio::openai_speech(const String& api_key, const String& model,
 }
 
 //------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+bool Audio::connecttoserver(const char* url, const char* api_key,
+                            const uint8_t* audioData, size_t length) {
+  if (!url || strlen(url) == 0) {
+    AUDIO_INFO("URL is empty");
+    stopSong();
+    return false;
+  }
+
+  if (length == 0 || audioData == nullptr) {
+    AUDIO_INFO("Audio data is empty");
+    stopSong();
+    return false;
+  }
+
+  if (strlen(url) > 2048) {
+    AUDIO_INFO("URL is too long");
+    stopSong();
+    return false;
+  }
+
+  xSemaphoreTakeRecursive(mutex_playAudioData, 0.3 * configTICK_RATE_HZ);
+
+  setDefaults();
+
+  char* h_url = urlencode(url, true);
+  trim(h_url);
+
+  int16_t pos_slash = indexOf(h_url, "/", 10);  // Find the start of the path
+  int16_t pos_colon = indexOf(h_url, ":", 10);  // Find the port separator
+  int16_t pos_query = indexOf(h_url, "?", 10);  // Find the query separator
+
+  uint16_t hostwoext_begin = 0;
+  uint16_t port = 0;
+
+  // Determine if SSL is needed
+  if (startsWith(h_url, "https")) {
+    m_f_ssl = true;
+    hostwoext_begin = 8;  // "https://"
+    port = 443;
+  } else if (startsWith(h_url, "http")) {
+    m_f_ssl = false;
+    hostwoext_begin = 7;  // "http://"
+    port = 80;
+  } else {
+    AUDIO_INFO("Invalid URL format");
+    stopSong();
+    free(h_url);
+    xSemaphoreGiveRecursive(mutex_playAudioData);
+    return false;
+  }
+
+  // Determine the hostname and path
+  if (pos_slash > 0) h_url[pos_slash] = '\0';
+  if (pos_colon > 0 && (pos_query == -1 || pos_query > pos_colon)) {
+    port = atoi(h_url + pos_colon + 1);
+    h_url[pos_colon] = '\0';
+  }
+
+  const char* host = h_url + hostwoext_begin;
+  const char* path = (pos_slash > 0) ? (h_url + pos_slash + 1) : "/";
+
+  // Construct the HTTP request
+  String http_request =
+      "POST /" + String(path) + " HTTP/1.1\r\n" + "Host: " + String(host) +
+      "\r\n" + "X-API-Key: " + String(api_key) + "\r\n" +
+      "Accept-Encoding: identity;q=1,*;q=0\r\n" +
+      "User-Agent: CustomAudioClient/1.0\r\n" + "Content-Type: audio/pcm\r\n" +
+      "Content-Length: " + String(length) + "\r\n" +
+      "Connection: keep-alive\r\n\r\n";
+
+  _client = m_f_ssl ? static_cast<WiFiClient*>(&clientsecure)
+                    : static_cast<WiFiClient*>(&client);
+
+  AUDIO_INFO("Connecting to: \"%s\" on port %d path \"%s\"", host, port, path);
+  uint32_t t = millis();
+  bool res = _client->connect(host, port);
+
+  if (res) {
+    uint32_t dt = millis() - t;
+    AUDIO_INFO("%s connection established in %lu ms, free Heap: %lu bytes",
+               m_f_ssl ? "SSL" : "Connection", (long unsigned int)dt,
+               (long unsigned int)ESP.getFreeHeap());
+    m_f_running = true;
+
+    // Send the HTTP request headers
+    _client->print(http_request);
+
+    // Send raw PCM audio data
+    _client->write(audioData, length);
+    AUDIO_INFO("Sent %d bytes of audio data", length);
+
+    if (res) {
+      m_dataMode = HTTP_RESPONSE_HEADER;
+      m_streamType = ST_WEBSTREAM;
+    }
+  } else {
+    AUDIO_INFO("Connection to %s failed!", host);
+    stopSong();
+  }
+
+  free(h_url);
+  xSemaphoreGiveRecursive(mutex_playAudioData);
+  return res;
+}
+
+//------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 bool Audio::connecttohost(
     const char* host, const char* user,
     const char* pwd) {  // user and pwd for authentification only, can be empty
