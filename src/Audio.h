@@ -149,6 +149,10 @@ class AudioBuffer {
 static const size_t AUDIO_STACK_SIZE = 3300;
 static StaticTask_t __attribute__((unused)) xAudioTaskBuffer;
 static StackType_t __attribute__((unused)) xAudioStack[AUDIO_STACK_SIZE];
+typedef struct {
+  uint8_t* data;
+  size_t length;
+} audio_queue_data_t;
 
 class Audio : private AudioBuffer {
   AudioBuffer InBuff;  // instance of input buffer
@@ -166,6 +170,7 @@ class Audio : private AudioBuffer {
   bool connecttospeech(const char* speech, const char* lang);
   bool connecttoserver(const char* host, const char* api_key,
                        const uint8_t* data, size_t length);
+  bool connecttoqueue(QueueHandle_t queueHandle);
   bool connecttoFS(fs::FS& fs, const char* path, int32_t m_fileStartPos = -1);
   bool setFileLoop(bool input);  // TEST loop
   void setConnectionTimeout(uint16_t timeout_ms, uint16_t timeout_ms_ssl);
@@ -236,6 +241,7 @@ class Audio : private AudioBuffer {
   void processWebFile();
   void processWebStreamTS();
   void processWebStreamHLS();
+  void processQueueStream();
   void playAudioData();
   bool readPlayListData();
   const char* parsePlaylist_M3U();
@@ -616,7 +622,7 @@ class Audio : private AudioBuffer {
     CODEC_OGG = 8,
     CODEC_VORBIS = 9
   };
-  enum : int { ST_NONE = 0, ST_WEBFILE = 1, ST_WEBSTREAM = 2 };
+  enum : int { ST_NONE = 0, ST_WEBFILE = 1, ST_WEBSTREAM = 2, ST_QUEUE = 3 };
   typedef enum { LEFTCHANNEL = 0, RIGHTCHANNEL = 1 } SampleIndex;
   typedef enum { LOWSHELF = 0, PEAKEQ = 1, HIFGSHELF = 2 } FilterType;
 
@@ -787,6 +793,7 @@ class Audio : private AudioBuffer {
   bool m_f_lockInBuffer = false;  // lock inBuffer for manipulation
   bool m_f_audioTaskIsDecoding = false;
   bool m_f_acceptRanges = false;
+  bool m_f_lastChunk = false;
   uint8_t m_f_channelEnabled = 3;  // internal DAC, both channels
   uint32_t m_audioFileDuration = 0;
   float m_audioCurrentTime = 0;
@@ -805,6 +812,7 @@ class Audio : private AudioBuffer {
   int16_t m_pidOfAAC;
   uint8_t m_packetBuff[m_tsPacketSize];
   int16_t m_pesDataLength = 0;
+  QueueHandle_t m_queueHandle = NULL;
 };
 
 //----------------------------------------------------------------------------------------------------------------------

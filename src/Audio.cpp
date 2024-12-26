@@ -397,6 +397,7 @@ void Audio::setDefaults() {
   m_f_ID3v1TagFound = false;
   m_f_lockInBuffer = false;
   m_f_acceptRanges = false;
+  m_f_lastChunk = false;
 
   m_streamType = ST_NONE;
   m_codec = CODEC_NONE;
@@ -426,6 +427,7 @@ void Audio::setDefaults() {
   m_M4A_sampleRate = 0;
   m_sumBytesDecoded = 0;
   m_vuLeft = m_vuRight = 0;  // #835
+  m_queueHandle = NULL;
 }
 
 //------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -637,6 +639,43 @@ bool Audio::connecttoserver(const char* url, const char* api_key,
   free(h_url);
   xSemaphoreGiveRecursive(mutex_playAudioData);
   return res;
+}
+
+//------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+bool Audio::connecttoqueue(QueueHandle_t queueHandle) {
+  // Grab lock
+  xSemaphoreTakeRecursive(mutex_playAudioData, 0.3 * configTICK_RATE_HZ);
+
+  // Reset everything to a known state
+  setDefaults();
+
+  // Here we store the user’s queue handle somewhere:
+  m_queueHandle = queueHandle;
+
+  // Set up the library’s internal flags so that loop() knows we have data to
+  // process
+  m_f_running = true;
+  m_streamType = ST_QUEUE;
+  m_dataMode = AUDIO_DATA;  // So that loop() calls our new processing function
+
+  // If you know the total size or the codec upfront, you can set them:
+  // e.g., if it is MP3 in the queue:
+  m_expectedCodec = CODEC_MP3;
+  m_codec = CODEC_MP3;
+  // or if it’s raw PCM or unknown, do:
+  // m_expectedCodec = CODEC_NONE;
+
+  // init decoder
+  if (!initializeDecoder(m_codec)) {
+    AUDIO_INFO("Failed to initialize decoder");
+    stopSong();
+    xSemaphoreGiveRecursive(mutex_playAudioData);
+    return false;
+  }
+
+  xSemaphoreGiveRecursive(mutex_playAudioData);
+  return true;
 }
 
 //------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -2891,6 +2930,7 @@ void Audio::loop() {
       case AUDIO_DATA:
         if (m_streamType == ST_WEBSTREAM) processWebStream();
         if (m_streamType == ST_WEBFILE) processWebFile();
+        if (m_streamType == ST_QUEUE) processQueueStream();
         break;
     }
   } else {  // m3u8 datastream only
@@ -4242,6 +4282,73 @@ void Audio::processWebStreamHLS() {
     if (m_f_Log) AUDIO_INFO("buffer filled in %u ms", filltime);
   }
   return;
+}
+//------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+void Audio::processQueueStream() {
+  if (m_dataMode != AUDIO_DATA || m_streamType != ST_QUEUE) return;
+
+  const uint16_t maxFrameSize = InBuff.getMaxBlockSize();
+  static uint32_t lastDataTime = millis();
+
+  if (m_f_firstCall) {
+    m_f_firstCall = false;
+    m_f_stream = false;
+    readMetadata(0, true);
+  }
+
+  audio_queue_data_t queueData;
+  if (xQueueReceive(m_queueHandle, &queueData, 0) == pdPASS) {
+    if (!queueData.data || queueData.length == 0) {
+      AUDIO_INFO("Empty Message Received.");
+      m_f_lastChunk = true;
+      return;
+    }
+
+    size_t space = InBuff.writeSpace();
+    size_t bytesToWrite = min(queueData.length, space);
+
+    if (bytesToWrite > 0) {
+      memcpy(InBuff.getWritePtr(), queueData.data, bytesToWrite);
+      InBuff.bytesWritten(bytesToWrite);
+    }
+
+    if (bytesToWrite < queueData.length) {
+      audio_queue_data_t remaining;
+      remaining.data = (uint8_t*)malloc(queueData.length - bytesToWrite);
+      remaining.length = queueData.length - bytesToWrite;
+
+      if (remaining.data) {
+        memcpy(remaining.data, queueData.data + bytesToWrite, remaining.length);
+        if (xQueueSendToFront(m_queueHandle, &remaining, 0) != pdPASS) {
+          free(remaining.data);
+        }
+      }
+    }
+
+    free(queueData.data);
+
+    if (InBuff.bufferFilled() > maxFrameSize && !m_f_stream) {
+      m_f_stream = true;
+      AUDIO_INFO("stream ready");
+    }
+  }
+
+  // debug all values
+  // if (millis() - lastDataTime > 10) {
+  //   lastDataTime = millis();
+  //   AUDIO_INFO(
+  //       "Buffer state: filled=%d/%d validSamples=%d lastChunk=%d"
+  //       "m_f_audioTaskIsDecoding=%d",
+  //       InBuff.bufferFilled(), maxFrameSize, m_validSamples, m_f_lastChunk,
+  //       m_f_audioTaskIsDecoding);
+  // }
+  if (m_f_lastChunk && m_validSamples == 0 && !m_f_audioTaskIsDecoding &&
+      InBuff.bufferFilled() < maxFrameSize) {
+    m_f_running = false;
+    m_f_lastChunk = false;
+    m_dataMode = AUDIO_NONE;
+    AUDIO_INFO("Queue playback complete");
+  }
 }
 //------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 void Audio::playAudioData() {
@@ -6879,7 +6986,7 @@ boolean Audio::streamDetection(uint32_t bytesAvail) {
         m_f_running = false;
         m_dataMode = AUDIO_NONE;
       } else {
-        AUDIO_INFO("Stream lost -> try new connection");
+        // AUDIO_INFO("Stream lost -> try new connection");
         // connecttohost(m_lastHost);
         //  New: @ Jeffry
         AUDIO_INFO("End of Stream.");
