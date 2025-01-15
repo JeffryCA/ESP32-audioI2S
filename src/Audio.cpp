@@ -313,6 +313,7 @@ void Audio::setDefaults() {
     m_f_ID3v1TagFound = false;
     m_f_lockInBuffer = false;
     m_f_acceptRanges = false;
+    m_f_lastChunk = false;
 
     m_streamType = ST_NONE;
     m_codec = CODEC_NONE;
@@ -342,6 +343,7 @@ void Audio::setDefaults() {
     m_M4A_sampleRate = 0;
     m_sumBytesDecoded = 0;
     m_vuLeft = m_vuRight = 0; // #835
+    m_queueHandle = NULL;
 }
 
 //------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -441,6 +443,123 @@ bool Audio::openai_speech(const String& api_key, const String& model, const Stri
     }
     xSemaphoreGiveRecursive(mutex_playAudioData);
     return res;
+}
+
+//------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+bool Audio::connecttoserver(const char* url, const char* api_key, const uint8_t* audioData, size_t length) {
+  if (!url || strlen(url) == 0) {
+    AUDIO_INFO("URL is empty");
+    stopSong();
+    return false;
+  }
+  if (length == 0 || audioData == nullptr) {
+    AUDIO_INFO("Audio data is empty");
+    stopSong();
+    return false;
+  }
+  if (strlen(url) > 2048) {
+    AUDIO_INFO("URL is too long");
+    stopSong();
+    return false;
+  }
+  xSemaphoreTakeRecursive(mutex_playAudioData, 0.3 * configTICK_RATE_HZ);
+  setDefaults();
+  char* h_url = urlencode(url, true);
+  trim(h_url);
+  int16_t pos_slash = indexOf(h_url, "/", 10);  // Find the start of the path
+  int16_t pos_colon = indexOf(h_url, ":", 10);  // Find the port separator
+  int16_t pos_query = indexOf(h_url, "?", 10);  // Find the query separator
+  uint16_t hostwoext_begin = 0;
+  uint16_t port = 0;
+  // Determine if SSL is needed
+  if (startsWith(h_url, "https")) {
+    m_f_ssl = true;
+    hostwoext_begin = 8;  // "https://"
+    port = 443;
+  } else if (startsWith(h_url, "http")) {
+    m_f_ssl = false;
+    hostwoext_begin = 7;  // "http://"
+    port = 80;
+  } else {
+    AUDIO_INFO("Invalid URL format");
+    stopSong();
+    free(h_url);
+    xSemaphoreGiveRecursive(mutex_playAudioData);
+    return false;
+  }
+  // Determine the hostname and path
+  if (pos_slash > 0) h_url[pos_slash] = '\0';
+  if (pos_colon > 0 && (pos_query == -1 || pos_query > pos_colon)) {
+    port = atoi(h_url + pos_colon + 1);
+    h_url[pos_colon] = '\0';
+  }
+  const char* host = h_url + hostwoext_begin;
+  const char* path = (pos_slash > 0) ? (h_url + pos_slash + 1) : "/";
+  // Construct the HTTP request
+  String http_request =
+      "POST /" + String(path) + " HTTP/1.1\r\n" + "Host: " + String(host) +
+      "\r\n" + "X-API-Key: " + String(api_key) + "\r\n" +
+      "Accept-Encoding: identity;q=1,*;q=0\r\n" +
+      "User-Agent: CustomAudioClient/1.0\r\n" + "Content-Type: audio/pcm\r\n" +
+      "Content-Length: " + String(length) + "\r\n" +
+      "Connection: keep-alive\r\n\r\n";
+  _client = m_f_ssl ? static_cast<WiFiClient*>(&clientsecure)
+                    : static_cast<WiFiClient*>(&client);
+  AUDIO_INFO("Connecting to: \"%s\" on port %d path \"%s\"", host, port, path);
+  uint32_t t = millis();
+  bool res = _client->connect(host, port);
+  if (res) {
+    uint32_t dt = millis() - t;
+    AUDIO_INFO("%s connection established in %lu ms, free Heap: %lu bytes",
+               m_f_ssl ? "SSL" : "Connection", (long unsigned int)dt,
+               (long unsigned int)ESP.getFreeHeap());
+    m_f_running = true;
+    // Send the HTTP request headers
+    _client->print(http_request);
+    // Send raw PCM audio data
+    _client->write(audioData, length);
+    AUDIO_INFO("Sent %d bytes of audio data", length);
+    if (res) {
+      m_dataMode = HTTP_RESPONSE_HEADER;
+      m_streamType = ST_WEBSTREAM;
+    }
+  } else {
+    AUDIO_INFO("Connection to %s failed!", host);
+    stopSong();
+  }
+  free(h_url);
+  xSemaphoreGiveRecursive(mutex_playAudioData);
+  return res;
+}
+
+//------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+bool Audio::connecttoqueue(QueueHandle_t queueHandle) {
+  // Grab lock
+  xSemaphoreTakeRecursive(mutex_playAudioData, 0.3 * configTICK_RATE_HZ);
+  // Reset everything to a known state
+  setDefaults();
+  // Here we store the user’s queue handle somewhere:
+  m_queueHandle = queueHandle;
+  // Set up the library’s internal flags so that loop() knows we have data to
+  // process
+  m_f_running = true;
+  m_streamType = ST_QUEUE;
+  m_dataMode = AUDIO_DATA;  // So that loop() calls our new processing function
+  // If you know the total size or the codec upfront, you can set them:
+  // e.g., if it is MP3 in the queue:
+  m_expectedCodec = CODEC_MP3;
+  m_codec = CODEC_MP3;
+  // or if it’s raw PCM or unknown, do:
+  // m_expectedCodec = CODEC_NONE;
+  // init decoder
+  if (!initializeDecoder(m_codec)) {
+    AUDIO_INFO("Failed to initialize decoder");
+    stopSong();
+    xSemaphoreGiveRecursive(mutex_playAudioData);
+    return false;
+  }
+  xSemaphoreGiveRecursive(mutex_playAudioData);
+  return true;
 }
 
 //------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -2359,6 +2478,7 @@ void Audio::loop() {
             case AUDIO_DATA:
                 if(m_streamType == ST_WEBSTREAM) processWebStream();
                 if(m_streamType == ST_WEBFILE) processWebFile();
+                if(m_streamType == ST_QUEUE) processQueueStream();
                 break;
         }
     }
@@ -3551,6 +3671,65 @@ void Audio::processWebStreamHLS() {
     }
     return;
 }
+
+//------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+void Audio::processQueueStream() {
+  if (m_dataMode != AUDIO_DATA || m_streamType != ST_QUEUE) return;
+  const uint16_t maxFrameSize = InBuff.getMaxBlockSize();
+  static uint32_t lastDataTime = millis();
+  if (m_f_firstCall) {
+    m_f_firstCall = false;
+    m_f_stream = false;
+    readMetadata(0, true);
+  }
+  audio_queue_data_t queueData;
+  if (xQueueReceive(m_queueHandle, &queueData, 0) == pdPASS) {
+    if (!queueData.data || queueData.length == 0) {
+      AUDIO_INFO("Empty Message Received.");
+      m_f_lastChunk = true;
+      return;
+    }
+    size_t space = InBuff.writeSpace();
+    size_t bytesToWrite = min(queueData.length, space);
+    if (bytesToWrite > 0) {
+      memcpy(InBuff.getWritePtr(), queueData.data, bytesToWrite);
+      InBuff.bytesWritten(bytesToWrite);
+    }
+    if (bytesToWrite < queueData.length) {
+      audio_queue_data_t remaining;
+      remaining.data = (uint8_t*)malloc(queueData.length - bytesToWrite);
+      remaining.length = queueData.length - bytesToWrite;
+      if (remaining.data) {
+        memcpy(remaining.data, queueData.data + bytesToWrite, remaining.length);
+        if (xQueueSendToFront(m_queueHandle, &remaining, 0) != pdPASS) {
+          free(remaining.data);
+        }
+      }
+    }
+    free(queueData.data);
+    if (InBuff.bufferFilled() > maxFrameSize && !m_f_stream) {
+      m_f_stream = true;
+      AUDIO_INFO("stream ready");
+    }
+  }
+  // debug all values
+  // if (millis() - lastDataTime > 10) {
+  //   lastDataTime = millis();
+  //   AUDIO_INFO(
+  //       "Buffer state: filled=%d/%d validSamples=%d lastChunk=%d"
+  //       "m_f_audioTaskIsDecoding=%d",
+  //       InBuff.bufferFilled(), maxFrameSize, m_validSamples, m_f_lastChunk,
+  //       m_f_audioTaskIsDecoding);
+  // }
+  if (m_f_lastChunk && m_validSamples == 0 && !m_f_audioTaskIsDecoding &&
+      InBuff.bufferFilled() < maxFrameSize) {
+    m_f_running = false;
+    m_f_lastChunk = false;
+    m_dataMode = AUDIO_NONE;
+    AUDIO_INFO("Queue playback complete");
+  }
+}
+
 //------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 void Audio::playAudioData() {
 
@@ -5747,8 +5926,12 @@ boolean Audio::streamDetection(uint32_t bytesAvail) {
                 m_f_running = false;
                 m_dataMode = AUDIO_NONE;
             } else {
-                AUDIO_INFO("Stream lost -> try new connection");
-                connecttohost(m_lastHost);
+                // AUDIO_INFO("Stream lost -> try new connection");
+                // connecttohost(m_lastHost);
+                //  FIXME: @ Jeffry - do not reconnect when connecting to server or queue
+                AUDIO_INFO("End of Stream.");
+                m_f_running = false;
+                m_dataMode = AUDIO_NONE;
             }
             return true;
         }
