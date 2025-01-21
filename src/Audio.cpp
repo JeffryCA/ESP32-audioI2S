@@ -4429,7 +4429,7 @@ bool Audio::parseHttpResponseHeader() {  // this is the response to a GET /
   if (m_dataMode != HTTP_RESPONSE_HEADER) return false;
 
   uint32_t ctime = millis();
-  uint32_t timeout = 4500;  // ms
+  uint32_t timeout = 60000;  // ms
 
   static uint32_t stime;
   static bool f_time = false;
