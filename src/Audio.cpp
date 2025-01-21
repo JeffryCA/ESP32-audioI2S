@@ -624,7 +624,18 @@ bool Audio::connecttoserver(const char* url, const char* api_key,
     _client->print(http_request);
 
     // Send raw PCM audio data
-    _client->write(audioData, length);
+    size_t bytesSent = 0;
+    while (bytesSent < length) {
+      size_t chunkSize = min((size_t)4096, length - bytesSent);
+      size_t sent = _client->write(audioData + bytesSent, chunkSize);
+      if (sent == 0) {
+        AUDIO_INFO("Failed to send chunk, stopping.");
+        stopSong();
+        return false;
+      }
+      bytesSent += sent;
+      delay(10);  // Give time for TCP to process
+    }
     AUDIO_INFO("Sent %d bytes of audio data", length);
 
     if (res) {
