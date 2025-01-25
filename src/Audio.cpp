@@ -634,7 +634,7 @@ bool Audio::connecttoserver(const char* url, const char* api_key,
         return false;
       }
       bytesSent += sent;
-      delay(10);  // Give time for TCP to process
+      vTaskDelay(pdMS_TO_TICKS(10));  // Give time for TCP to process
     }
     AUDIO_INFO("Sent %d bytes of audio data", length);
 
