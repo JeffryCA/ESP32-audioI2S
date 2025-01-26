@@ -4354,7 +4354,7 @@ void Audio::processQueueStream() {
   //       m_f_audioTaskIsDecoding);
   // }
   if (m_f_lastChunk && m_validSamples == 0 && !m_f_audioTaskIsDecoding &&
-      InBuff.bufferFilled() < maxFrameSize) {
+      InBuff.bufferFilled() == 0) {
     m_f_running = false;
     m_f_lastChunk = false;
     m_dataMode = AUDIO_NONE;
@@ -4399,6 +4399,10 @@ void Audio::playAudioData() {
     if (m_sumBytesDecoded >= m_audioDataSize && m_sumBytesDecoded != 0) {
       m_f_eof = true;
       goto exit;
+    }
+  } else if (m_streamType == ST_QUEUE && m_f_lastChunk) {
+    if (InBuff.bufferFilled() > 0) {
+      lastFrame = true;
     }
   }
   if (!lastFrame)
