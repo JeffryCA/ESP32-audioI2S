@@ -654,7 +654,7 @@ bool Audio::connecttoserver(const char* url, const char* api_key,
 
 //------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-bool Audio::connecttoqueue(QueueHandle_t queueHandle) {
+bool Audio::connecttoqueue(QueueHandle_t queueHandle, uint8_t codec) {
   // Grab lock
   xSemaphoreTakeRecursive(mutex_playAudioData, 0.3 * configTICK_RATE_HZ);
 
@@ -669,13 +669,8 @@ bool Audio::connecttoqueue(QueueHandle_t queueHandle) {
   m_f_running = true;
   m_streamType = ST_QUEUE;
   m_dataMode = AUDIO_DATA;  // So that loop() calls our new processing function
-
-  // If you know the total size or the codec upfront, you can set them:
-  // e.g., if it is MP3 in the queue:
-  m_expectedCodec = CODEC_MP3;
-  m_codec = CODEC_MP3;
-  // or if it’s raw PCM or unknown, do:
-  // m_expectedCodec = CODEC_NONE;
+  m_expectedCodec = codec;
+  m_codec = codec;
 
   // init decoder
   if (!initializeDecoder(m_codec)) {
@@ -683,6 +678,15 @@ bool Audio::connecttoqueue(QueueHandle_t queueHandle) {
     stopSong();
     xSemaphoreGiveRecursive(mutex_playAudioData);
     return false;
+  }
+
+  // pcm 16000 data
+  if (m_codec == CODEC_PCM) {
+    setChannels(2);
+    setSampleRate(16000);
+    setBitsPerSample(16);
+    setBitrate(256000);
+    reconfigI2S();
   }
 
   xSemaphoreGiveRecursive(mutex_playAudioData);
@@ -4307,6 +4311,16 @@ void Audio::processQueueStream() {
     readMetadata(0, true);
   }
 
+  // log state
+  // if (millis() - lastDataTime > 250) {
+  //   lastDataTime = millis();
+  //   AUDIO_INFO(
+  //       "Buffer state: filled=%d/%d validSamples=%d lastChunk=%d"
+  //       " m_f_audioTaskIsDecoding=%d",
+  //       InBuff.bufferFilled(), maxFrameSize, m_validSamples, m_f_lastChunk,
+  //       m_f_audioTaskIsDecoding);
+  // }
+
   audio_queue_data_t queueData;
   if (xQueueReceive(m_queueHandle, &queueData, 0) == pdPASS) {
     if (!queueData.data || queueData.length == 0) {
@@ -4344,15 +4358,6 @@ void Audio::processQueueStream() {
     }
   }
 
-  // debug all values
-  // if (millis() - lastDataTime > 10) {
-  //   lastDataTime = millis();
-  //   AUDIO_INFO(
-  //       "Buffer state: filled=%d/%d validSamples=%d lastChunk=%d"
-  //       "m_f_audioTaskIsDecoding=%d",
-  //       InBuff.bufferFilled(), maxFrameSize, m_validSamples, m_f_lastChunk,
-  //       m_f_audioTaskIsDecoding);
-  // }
   if (m_f_lastChunk && m_validSamples == 0 && !m_f_audioTaskIsDecoding &&
       InBuff.bufferFilled() == 0) {
     m_f_running = false;
@@ -4363,75 +4368,113 @@ void Audio::processQueueStream() {
 }
 //------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 void Audio::playAudioData() {
-  if (!m_f_stream) return;  // guard
+  if (m_codec != CODEC_PCM) {  // default code logic
+    if (!m_f_stream) return;   // guard
 
-  static bool f_isFile = false;
-  bool lastFrame = false;
-  uint32_t bytesToDecode = 0;
+    static bool f_isFile = false;
+    bool lastFrame = false;
+    uint32_t bytesToDecode = 0;
 
-  if (m_f_firstPlayCall) {
-    m_f_firstPlayCall = false;
-    if (m_playlistFormat == FORMAT_M3U8)
-      f_isFile = false;
-    else if (m_dataMode == AUDIO_LOCALFILE)
-      f_isFile = true;
-    else if (m_streamType == ST_WEBFILE)
-      f_isFile = true;
-    else
-      f_isFile = false;
-  }
-
-  if (m_validSamples) {
-    playChunk();
-    return;
-  }  // play samples first
-  if (m_f_eof) return;
-
-  if (m_f_lockInBuffer) return;
-  m_f_audioTaskIsDecoding = true;
-  uint8_t next = 0;
-  int bytesDecoded = 0;
-  if (f_isFile) {
-    bytesToDecode = m_audioDataSize - m_sumBytesDecoded;
-    if (bytesToDecode < InBuff.getMaxBlockSize()) {
-      lastFrame = true;
+    if (m_f_firstPlayCall) {
+      m_f_firstPlayCall = false;
+      if (m_playlistFormat == FORMAT_M3U8)
+        f_isFile = false;
+      else if (m_dataMode == AUDIO_LOCALFILE)
+        f_isFile = true;
+      else if (m_streamType == ST_WEBFILE)
+        f_isFile = true;
+      else
+        f_isFile = false;
     }
-    if (m_sumBytesDecoded >= m_audioDataSize && m_sumBytesDecoded != 0) {
-      m_f_eof = true;
-      goto exit;
-    }
-  } else if (m_streamType == ST_QUEUE && m_f_lastChunk) {
-    if (InBuff.bufferFilled() > 0) {
-      lastFrame = true;
-    }
-  }
-  if (!lastFrame)
-    if (InBuff.bufferFilled() < InBuff.getMaxBlockSize()) goto exit;
-  ;
 
-  bytesDecoded = sendBytes(InBuff.getReadPtr(), InBuff.getMaxBlockSize());
-  if (!m_f_running) return;
+    if (m_validSamples) {
+      playChunk();
+      return;
+    }  // play samples first
+    if (m_f_eof) return;
 
-  if (bytesDecoded < 0) {  // no syncword found or decode error, try next chunk
-    next = 200;
-    if (InBuff.bufferFilled() < next) next = InBuff.bufferFilled();
-    InBuff.bytesWasRead(next);  // try next chunk
-    m_bytesNotDecoded += next;
-    m_sumBytesDecoded += next;
-  } else {
-    if (bytesDecoded > 0) {
-      InBuff.bytesWasRead(bytesDecoded);
-      m_sumBytesDecoded += bytesDecoded;
-      if (f_isFile && m_codec == CODEC_MP3) {
-        if (m_audioDataSize - m_sumBytesDecoded == 128) {
-          m_f_ID3v1TagFound = true;
-          m_f_eof = true;
-          goto exit;
-        }
+    if (m_f_lockInBuffer) return;
+    m_f_audioTaskIsDecoding = true;
+    uint8_t next = 0;
+    int bytesDecoded = 0;
+    if (f_isFile) {
+      bytesToDecode = m_audioDataSize - m_sumBytesDecoded;
+      if (bytesToDecode < InBuff.getMaxBlockSize()) {
+        lastFrame = true;
       }
-      goto exit;
+      if (m_sumBytesDecoded >= m_audioDataSize && m_sumBytesDecoded != 0) {
+        m_f_eof = true;
+        goto exit;
+      }
+    } else if (m_streamType == ST_QUEUE && m_f_lastChunk) {
+      if (InBuff.bufferFilled() > 0) {
+        lastFrame = true;
+      }
     }
-    if (bytesDecoded == 0) goto exit;  // syncword at pos0
+    if (!lastFrame)
+      if (InBuff.bufferFilled() < InBuff.getMaxBlockSize()) goto exit;
+    ;
+
+    bytesDecoded = sendBytes(InBuff.getReadPtr(), InBuff.getMaxBlockSize());
+    if (!m_f_running) return;
+
+    if (bytesDecoded <
+        0) {  // no syncword found or decode error, try next chunk
+      next = 200;
+      if (InBuff.bufferFilled() < next) next = InBuff.bufferFilled();
+      InBuff.bytesWasRead(next);  // try next chunk
+      m_bytesNotDecoded += next;
+      m_sumBytesDecoded += next;
+    } else {
+      if (bytesDecoded > 0) {
+        InBuff.bytesWasRead(bytesDecoded);
+        m_sumBytesDecoded += bytesDecoded;
+        if (f_isFile && m_codec == CODEC_MP3) {
+          if (m_audioDataSize - m_sumBytesDecoded == 128) {
+            m_f_ID3v1TagFound = true;
+            m_f_eof = true;
+            goto exit;
+          }
+        }
+        goto exit;
+      }
+      if (bytesDecoded == 0) goto exit;  // syncword at pos0
+    }
+  } else if (m_codec == CODEC_PCM) {  // custome PCM code
+    if (!m_f_stream) return;          // guard
+
+    // If we already have samples waiting, just play them
+    if (m_validSamples) {
+      playChunk();
+      return;
+    }
+
+    size_t chunkSize = InBuff.getMaxBlockSize();
+    size_t available = InBuff.bufferFilled();
+    if (chunkSize > available) {
+      chunkSize = available;
+    }
+    if (chunkSize > m_outbuffSize) {
+      chunkSize = m_outbuffSize;
+    }
+    if (chunkSize == 0) {
+      return;
+    }
+
+    m_f_audioTaskIsDecoding = true;
+    memcpy(m_outBuff, InBuff.getReadPtr(), chunkSize);
+    InBuff.bytesWasRead(chunkSize);
+
+    int16_t* buf = (int16_t*)m_outBuff;
+    m_validSamples = chunkSize / 2;
+    for (int i = m_validSamples - 1; i >= 0; i--) {
+      int16_t s = buf[i];
+      buf[2 * i + 0] = s;
+      buf[2 * i + 1] = s;
+    }
+
+    playChunk();
+    m_f_audioTaskIsDecoding = false;
   }
 exit:
   m_f_audioTaskIsDecoding = false;
@@ -4819,6 +4862,11 @@ bool Audio::initializeDecoder(uint8_t codec) {
     case CODEC_WAV:
       InBuff.changeMaxBlockSize(m_frameSizeWav);
       break;
+
+    case CODEC_PCM:
+      InBuff.changeMaxBlockSize(m_frameSizePCM);
+      break;
+
     case CODEC_OGG:  // the decoder will be determined later (vorbis, flac,
                      // opus?)
       break;

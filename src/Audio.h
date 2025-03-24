@@ -170,7 +170,7 @@ class Audio : private AudioBuffer {
   bool connecttospeech(const char* speech, const char* lang);
   bool connecttoserver(const char* host, const char* api_key,
                        const uint8_t* data, size_t length);
-  bool connecttoqueue(QueueHandle_t queueHandle);
+  bool connecttoqueue(QueueHandle_t queueHandle, uint8_t codec = 2);
   bool connecttoFS(fs::FS& fs, const char* path, int32_t m_fileStartPos = -1);
   bool setFileLoop(bool input);  // TEST loop
   void setConnectionTimeout(uint16_t timeout_ms, uint16_t timeout_ms_ssl);
@@ -620,7 +620,8 @@ class Audio : private AudioBuffer {
     CODEC_AACP = 6,
     CODEC_OPUS = 7,
     CODEC_OGG = 8,
-    CODEC_VORBIS = 9
+    CODEC_VORBIS = 9,
+    CODEC_PCM = 10
   };
   enum : int { ST_NONE = 0, ST_WEBFILE = 1, ST_WEBSTREAM = 2, ST_QUEUE = 3 };
   typedef enum { LEFTCHANNEL = 0, RIGHTCHANNEL = 1 } SampleIndex;
@@ -669,6 +670,7 @@ class Audio : private AudioBuffer {
   std::vector<char*> m_playlistURL;      // m3u8 streamURLs buffer
   std::vector<uint32_t> m_hashQueue;
 
+  const size_t m_frameSizePCM = 1600;
   const size_t m_frameSizeWav = 4096;
   const size_t m_frameSizeMP3 = 1600;
   const size_t m_frameSizeAAC = 1600;
