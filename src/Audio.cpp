@@ -2772,7 +2772,8 @@ uint32_t Audio::stopSong() {
     AUDIO_INFO("Closing audio file \"%s\"", audiofile.name());
     audiofile.close();
   }
-  memset(m_filterBuff, 0, sizeof(m_filterBuff));  // Clear FilterBuffer
+  memset(m_filterBuff, 0, sizeof(m_filterBuff));          // Clear FilterBuffer
+  memset(m_outBuff, 0, m_outbuffSize * sizeof(int16_t));  // Clear OutputBuffer
   m_validSamples = 0;
   m_audioCurrentTime = 0;
   m_audioFileDuration = 0;
