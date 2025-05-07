@@ -294,10 +294,10 @@ class Audio : private AudioBuffer {
  public:
   void setAudioTaskCore(uint8_t coreID);
   uint32_t getHighWatermark();
+  void stopAudioTask();  // stops task for audio
 
  private:
   void startAudioTask();  // starts a task for decode and play
-  void stopAudioTask();   // stops task for audio
   static void taskWrapper(void* param);
   void audioTask();
   void performAudioTask();
