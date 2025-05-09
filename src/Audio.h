@@ -146,7 +146,7 @@ class AudioBuffer {
 };
 //----------------------------------------------------------------------------------------------------------------------
 
-static const size_t AUDIO_STACK_SIZE = 3300;
+static const size_t AUDIO_STACK_SIZE = 6000;
 static StaticTask_t __attribute__((unused)) xAudioTaskBuffer;
 static StackType_t __attribute__((unused)) xAudioStack[AUDIO_STACK_SIZE];
 typedef struct {
